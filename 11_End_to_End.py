@@ -9,6 +9,9 @@ from chromadb.config import Settings
 import streamlit as st
 from openai import OpenAI
 
+# Ensure tokenizers parallelism is disabled before any import that may use tokenizers
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
 # ----------- Step 1: Read PDF files -----------
 def read_pdfs(pdf_paths: List[str]) -> List[str]:
     texts = []
@@ -72,19 +75,31 @@ def search(request: SearchRequest):
 # ----------- Step 5: Streamlit UI with LLM -----------
 def streamlit_ui():
     st.title("AI Agent PDF Semantic Search")
-    uploaded_files = st.file_uploader("Upload PDF files", type="pdf", accept_multiple_files=True)
+    uploaded_files = st.file_uploader("Upload PDF file", type="pdf", accept_multiple_files=False)
     if uploaded_files:
+        # Normalize to a list whether file_uploader returned one file or multiple
+        files = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
+
         pdf_paths = []
         upload_dir = "temp"
         # Ensure upload directory exists
         os.makedirs(upload_dir, exist_ok=True)
-        for uploaded_file in uploaded_files:
-            # sanitize filename to avoid path traversal
-            safe_name = os.path.basename(uploaded_file.name)
+        for uploaded_file in files:
+            # UploadedFile from Streamlit exposes .name and .getbuffer(); handle fallbacks
+            filename = getattr(uploaded_file, "name", None) or "uploaded.pdf"
+            safe_name = os.path.basename(filename)
             path = os.path.join(upload_dir, safe_name)
             try:
+                # prefer getbuffer (UploadedFile), fall back to read() or raw bytes
+                if hasattr(uploaded_file, "getbuffer"):
+                    data = uploaded_file.getbuffer()
+                elif hasattr(uploaded_file, "read"):
+                    data = uploaded_file.read()
+                else:
+                    # uploaded_file might already be bytes
+                    data = uploaded_file
                 with open(path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+                    f.write(data)
             except Exception as e:
                 st.error(f"Failed to save uploaded file {safe_name}: {e}")
                 continue
