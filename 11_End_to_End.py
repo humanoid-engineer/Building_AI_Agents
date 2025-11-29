@@ -2,57 +2,40 @@ import os
 from typing import List, Dict
 from fastapi import FastAPI, Query
 from pydantic import BaseModel
-from sentence_transformers import SentenceTransformer
-from pypdf import PdfReader
-import chromadb
 from chromadb.config import Settings
 import streamlit as st
 from openai import OpenAI
 
+# helpers
+from ai_helpers import (
+    read_pdfs,
+    clean_text,
+    chunk_text,
+    store_chunks,
+    query_chunks,
+    flatten_documents,
+    get_openai_response,
+    save_uploaded_files,
+)
+
 # Ensure tokenizers parallelism is disabled before any import that may use tokenizers
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-# ----------- Step 1: Read PDF files -----------
-def read_pdfs(pdf_paths: List[str]) -> List[str]:
-    texts = []
-    for path in pdf_paths:
-        reader = PdfReader(path)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
-        texts.append(text)
-    return texts
+# Streamlit page config and UI tweaks
+try:
+    st.set_page_config(page_title="AI Agent PDF Semantic Search", layout="wide")
+except Exception:
+    # set_page_config can only be called once and must be called before other st.* calls
+    pass
 
-# ----------- Step 2: Clean and Chunk -----------
-def clean_text(text: str) -> str:
-    return " ".join(text.split())
-
-def chunk_text(text: str, chunk_size: int = 500) -> List[str]:
-    sentences = text.split('. ')
-    chunks, chunk = [], ""
-    for sentence in sentences:
-        if len(chunk) + len(sentence) < chunk_size:
-            chunk += sentence + ". "
-        else:
-            chunks.append(chunk.strip())
-            chunk = sentence + ". "
-    if chunk:
-        chunks.append(chunk.strip())
-    return chunks
-
-# ----------- Step 3: Store chunks in ChromaDB -----------
-def store_chunks(chunks: List[str], metadata: List[Dict], collection_name: str = "pdf_chunks"):
-    client = chromadb.Client(Settings())
-    collection = client.get_or_create_collection(collection_name)
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    embeddings = model.encode(chunks)
-    for i, chunk in enumerate(chunks):
-        collection.add(
-            documents=[chunk],
-            embeddings=[embeddings[i]],
-            metadatas=[metadata[i]],
-            ids=[f"chunk_{i}"]
-        )
+# CSS to hide Streamlit main menu (which includes Deploy/Share/More) and header/footer
+_HIDE_STREAMLIT_STYLE = """
+    <style>
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    </style>
+"""
 
 # ----------- Step 4: FastAPI for Semantic Search -----------
 app = FastAPI()
@@ -62,48 +45,29 @@ class SearchRequest(BaseModel):
 
 @app.post("/search")
 def search(request: SearchRequest):
-    client = chromadb.Client(Settings())
-    collection = client.get_collection("pdf_chunks")
-    model = SentenceTransformer('all-MiniLM-L6-v2')
-    query_emb = model.encode([request.query])[0]
-    results = collection.query(
-        query_embeddings=[query_emb],
-        n_results=5
-    )
-    return {"results": results['documents'], "metadatas": results['metadatas']}
+    # Use helper to query stored chunks
+    results = query_chunks(request.query, n_results=5)
+    return {"results": results.get('documents', []), "metadatas": results.get('metadatas', [])}
 
 # ----------- Step 5: Streamlit UI with LLM -----------
 def streamlit_ui():
+    # hide Streamlit menu items and set UI
+    try:
+        st.markdown(_HIDE_STREAMLIT_STYLE, unsafe_allow_html=True)
+    except Exception:
+        pass
     st.title("AI Agent PDF Semantic Search")
+    # Track whether documents have been uploaded/processed in this session
+    if 'has_docs' not in st.session_state:
+        st.session_state['has_docs'] = False
     uploaded_files = st.file_uploader("Upload PDF file", type="pdf", accept_multiple_files=False)
     if uploaded_files:
         # Normalize to a list whether file_uploader returned one file or multiple
         files = uploaded_files if isinstance(uploaded_files, list) else [uploaded_files]
 
-        pdf_paths = []
+        # Save uploaded files using helper which handles various upload shapes
         upload_dir = "temp"
-        # Ensure upload directory exists
-        os.makedirs(upload_dir, exist_ok=True)
-        for uploaded_file in files:
-            # UploadedFile from Streamlit exposes .name and .getbuffer(); handle fallbacks
-            filename = getattr(uploaded_file, "name", None) or "uploaded.pdf"
-            safe_name = os.path.basename(filename)
-            path = os.path.join(upload_dir, safe_name)
-            try:
-                # prefer getbuffer (UploadedFile), fall back to read() or raw bytes
-                if hasattr(uploaded_file, "getbuffer"):
-                    data = uploaded_file.getbuffer()
-                elif hasattr(uploaded_file, "read"):
-                    data = uploaded_file.read()
-                else:
-                    # uploaded_file might already be bytes
-                    data = uploaded_file
-                with open(path, "wb") as f:
-                    f.write(data)
-            except Exception as e:
-                st.error(f"Failed to save uploaded file {safe_name}: {e}")
-                continue
-            pdf_paths.append(path)
+        pdf_paths = save_uploaded_files(files, upload_dir=upload_dir)
         texts = read_pdfs(pdf_paths)
         all_chunks, all_metadata = [], []
         for i, text in enumerate(texts):
@@ -112,34 +76,30 @@ def streamlit_ui():
             all_chunks.extend(chunks)
             all_metadata.extend([{"source": pdf_paths[i]} for _ in chunks])
         store_chunks(all_chunks, all_metadata)
+        # mark that we have documents available for querying in this session
+        st.session_state['has_docs'] = True
         st.success("PDFs processed and stored in ChromaDB.")
+    # Only enable the question input after PDFs have been uploaded/processed in this session
+    if st.session_state.get('has_docs', False):
+        query = st.text_input("Ask a question about your PDFs:")
+        if query:
+            pass  # continue to query handling below
+    else:
+        st.info("Upload and process at least one PDF to enable asking questions.")
+        return
 
-    query = st.text_input("Ask a question about your PDFs:")
     if query:
-        client = chromadb.Client(Settings())
-        collection = client.get_collection("pdf_chunks")
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        query_emb = model.encode([query])[0]
-        results = collection.query(
-            query_embeddings=[query_emb],
-            n_results=3
-        )
-        # results['documents'] may be a nested list (one list per query). Flatten and ensure strings.
+        results = query_chunks(query, n_results=3)
         raw_docs = results.get('documents', [])
-        flat_docs = []
-        for item in raw_docs:
-            if isinstance(item, list):
-                for sub in item:
-                    if isinstance(sub, str):
-                        flat_docs.append(sub)
-                    else:
-                        flat_docs.append(str(sub))
-            elif isinstance(item, str):
-                flat_docs.append(item)
-            else:
-                flat_docs.append(str(item))
+        flat_docs = flatten_documents(raw_docs)
 
         context = " ".join(flat_docs)
+        # Debug: show top retrieved chunks so you can verify the context
+        try:
+            #st.write("Retrieved chunks (top 5):", flat_docs[:5])
+            st.write(f"Context length (chars): {len(context)}")
+        except Exception:
+            pass
         if not context.strip():
             st.warning("No relevant context found for your query.")
         else:
@@ -149,20 +109,7 @@ def streamlit_ui():
                 st.error("OPENAI_API_KEY is not set. Set this environment variable to enable LLM responses.")
             else:
                 try:
-                    client = OpenAI(api_key=api_key)
-                    response = client.chat.completions.create(
-                        model="gpt-3.5-turbo",
-                        messages=[
-                            {"role": "system", "content": "You are a helpful assistant for answering questions about PDF documents."},
-                            {"role": "user", "content": f"Context: {context}\n\nQuestion: {query}"}
-                        ]
-                    )
-                    # Response shape is similar; guard access
-                    try:
-                        answer = response.choices[0].message.content
-                    except Exception:
-                        # Fallback to stringifying the response
-                        answer = str(response)
+                    answer = get_openai_response(context, query, api_key)
                     st.write("Answer:", answer)
                 except Exception as e:
                     st.error(f"OpenAI API error: {e}")
