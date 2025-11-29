@@ -11,11 +11,17 @@ You are an AI that classifies customer feedback as Positive, Neutral, or Negativ
 
 Examples:
 
-Text: "I love this product" → positive
-Text: "Worst experience ever" → negative
+Text: "The movie was okay, nothing special" → neutral
+Text: "Worst experience watching this movie" → negative
 
 Now classify the sentiment of the following text:
-Text: "The movie was okay, nothing special" →
+Text: "I loved watching Enthiran (Robo) movie" → 
+
+Output:
+{
+    "Movie": "Name of the movie",
+    "sentiment": ""
+}
 
 """
 resp = client.chat.completions.create(
@@ -23,7 +29,7 @@ resp = client.chat.completions.create(
 	messages=[{"role": "user", "content": prompt}],
 )
 try:
-	print("Movie is " + resp.choices[0].message.content)
+	print(resp.choices[0].message.content)
 except Exception:
 	# Fallback: print the raw response
 	print(resp)

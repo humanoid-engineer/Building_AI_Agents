@@ -1,0 +1,9 @@
+{
+"extract_user": {
+"description": "Extract name and city from text.",
+"template": "Extract details as JSON with fields name and support required. Text: {text}"
+},
+"sentiment": {
+"template": "Classify sentiment as positive, neutral, or negative. Text: {text}"
+}
+}
