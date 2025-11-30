@@ -139,3 +139,49 @@ def save_uploaded_files(uploaded_files, upload_dir: str = "temp") -> List[str]:
             f.write(data)
         paths.append(path)
     return paths
+
+
+def chunk_exists_in_vectordb(chunk_hash: str, collection_name: str = "pdf_chunks") -> bool:
+    """Check whether a chunk with the given hash already exists in the ChromaDB collection.
+
+    Attempts a metadata-filtered query first (if supported). Falls back to scanning stored metadatas.
+    """
+    client = chromadb.Client(Settings())
+    try:
+        collection = client.get_collection(collection_name)
+    except Exception:
+        # collection may not exist yet
+        return False
+
+    # Try a metadata-filtered query (may work depending on chromadb version)
+    try:
+        results = collection.query(query_embeddings=[], where={"hash": chunk_hash}, n_results=1, include=["metadatas"])
+        metadatas = results.get("metadatas", [])
+        for item in metadatas:
+            if isinstance(item, list):
+                for m in item:
+                    if isinstance(m, dict) and m.get("hash") == chunk_hash:
+                        return True
+            elif isinstance(item, dict) and item.get("hash") == chunk_hash:
+                return True
+    except Exception:
+        pass
+
+    # Fallback: retrieve metadatas and scan
+    try:
+        res = collection.get(include=["metadatas"])
+        metadatas = res.get("metadatas", [])
+        for m in metadatas:
+            if isinstance(m, dict) and m.get("hash") == chunk_hash:
+                return True
+    except Exception:
+        try:
+            res = collection.get()
+            metadatas = res.get("metadatas", []) if isinstance(res, dict) else []
+            for m in metadatas:
+                if isinstance(m, dict) and m.get("hash") == chunk_hash:
+                    return True
+        except Exception:
+            pass
+
+    return False
